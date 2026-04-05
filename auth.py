@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from databases.auth_db import get_auth_db
 from models.auth import User
+from utils.logger import logger
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -51,13 +52,17 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def require_homeowner(current_user: User = Depends(get_current_user)) -> User:
     from models.auth import UserRole
-    if current_user.role != UserRole.homeowner:
+    roles = [r.strip() for r in current_user.role.split(",")]
+    logger.info(f"User roles: {roles}")
+    if UserRole.homeowner.value not in roles:
         raise HTTPException(status_code=403, detail="Homeowners only")
     return current_user
 
 
 def require_provider(current_user: User = Depends(get_current_user)) -> User:
     from models.auth import UserRole
-    if current_user.role != UserRole.provider:
+    roles = [r.strip() for r in current_user.role.split(",")]
+    logger.info(f"User roles: {roles}")
+    if UserRole.provider.value not in roles:
         raise HTTPException(status_code=403, detail="Providers only")
     return current_user

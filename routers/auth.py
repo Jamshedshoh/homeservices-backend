@@ -1,3 +1,4 @@
+from utils.logger import logger
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -8,7 +9,6 @@ from models.auth import User
 from schemas import LoginRequest, RegisterRequest, TokenResponse, UserOut
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
-
 
 @router.post("/register", response_model=UserOut, status_code=201)
 def register(payload: RegisterRequest, db: Session = Depends(get_auth_db)):
@@ -26,7 +26,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_auth_db)):
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
         phone=payload.phone,
-        role=payload.role,
+        role=",".join(r.value for r in payload.role),
         bio=payload.bio,
         service_categories=service_cats,
         hourly_rate=payload.hourly_rate,
@@ -43,7 +43,9 @@ def register(payload: RegisterRequest, db: Session = Depends(get_auth_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_auth_db)):
+    logger.info(f"Login attempt for email: {form.username}")
     user = db.query(User).filter(User.email == form.username).first()
+    logger.info(f"User found: {user}" if user else "No user found")
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

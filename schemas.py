@@ -25,7 +25,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8)
     full_name: str = Field(min_length=1)
     phone: str | None = None
-    role: UserRole
+    role: list[UserRole]
 
     # Provider extras (optional at registration)
     bio: str | None = None
@@ -58,9 +58,16 @@ class UserOut(BaseModel):
     email: str
     full_name: str
     phone: str | None
-    role: UserRole
+    role: list[UserRole]
     is_active: bool
     created_at: datetime
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def parse_role(cls, v: object) -> list[UserRole]:
+        if isinstance(v, str):
+            return [UserRole(r.strip()) for r in v.split(",") if r.strip()]
+        return list(v)
 
     # Provider
     bio: str | None = None
