@@ -1,8 +1,8 @@
-# from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-# from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 
 # Import domain models so SQLAlchemy registers their metadata before create_all
 # import models.auth      # noqa: F401
@@ -14,8 +14,8 @@ from fastapi.responses import HTMLResponse
 # from databases.finance_db import FinanceBase, engine as finance_engine
 # from databases.jobs_db import JobsBase, engine as jobs_engine
 # from databases.messaging_db import MessagingBase, engine as messaging_engine
-# from routers import admin, auth, jobs, messages, notifications, offers, payments, providers, quotes, ratings, recurring, users
-# from seed_admin import ensure_admin_user
+from routers import admin, auth, jobs, messages, notifications, offers, payments, providers, quotes, ratings, recurring, users
+from seed_admin import ensure_admin_user
 
 # Create tables in each domain database
 # AuthBase.metadata.create_all(bind=auth_engine)
@@ -24,10 +24,10 @@ from fastapi.responses import HTMLResponse
 # FinanceBase.metadata.create_all(bind=finance_engine)
 
 
-# @asynccontextmanager
-# async def lifespan(_: FastAPI):
-#     ensure_admin_user()
-#     yield
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_admin_user()
+    yield
 
 
 app = FastAPI(
@@ -38,37 +38,37 @@ app = FastAPI(
         "booking, messaging, payments, ratings, recurring jobs, and more."
     ),
     version="1.0.0",
-    # lifespan=lifespan,
+    lifespan=lifespan,
 )
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  # Restrict in production
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-#     expose_headers=["X-Total-Count", "X-Skip", "X-Limit"],
-# )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Total-Count", "X-Skip", "X-Limit"],
+)
 
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
 
-# app.include_router(auth.router)
-# app.include_router(users.router)
-# app.include_router(providers.router)
-# app.include_router(quotes.router)
-# app.include_router(jobs.router)
-# app.include_router(offers.router)
-# app.include_router(messages.router)
-# app.include_router(payments.router)
-# app.include_router(ratings.router)
-# app.include_router(recurring.router)
-# app.include_router(notifications.router)
-# app.include_router(admin.router)
+app.include_router(auth.router)
+app.include_router(users.router)
+app.include_router(providers.router)
+app.include_router(quotes.router)
+app.include_router(jobs.router)
+app.include_router(offers.router)
+app.include_router(messages.router)
+app.include_router(payments.router)
+app.include_router(ratings.router)
+app.include_router(recurring.router)
+app.include_router(notifications.router)
+app.include_router(admin.router)
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, tags=["Root"])
 def read_root():
     return {"status": "ok", "service": "HomeServices API"}
 
