@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24  # 24 hours
 
+    # Optional: bootstrap one admin on startup / `python seed_admin.py`
+    admin_seed_email: str | None = None
+    admin_seed_password: str | None = None
+
     class Config:
         env_file = (".env", ".env.local")  # .env.local takes precedence
         env_file_encoding = "utf-8"

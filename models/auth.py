@@ -16,6 +16,7 @@ from databases.auth_db import AuthBase
 class UserRole(str, enum.Enum):
     homeowner = "homeowner"
     provider = "provider"
+    admin = "admin"
 
 
 class User(AuthBase):

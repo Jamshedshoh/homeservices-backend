@@ -95,6 +95,24 @@ class UserUpdateRequest(BaseModel):
     address: str | None = None
 
 
+class AdminUserUpdateRequest(BaseModel):
+    """Admin PATCH /admin/users/{id} — optional fields."""
+
+    email: EmailStr | None = None
+    full_name: str | None = None
+    phone: str | None = None
+    is_active: bool | None = None
+    role: list[UserRole] | None = None
+    bio: str | None = None
+    service_categories: list[ServiceCategory] | None = None
+    hourly_rate: float | None = None
+    address: str | None = None
+    service_radius_km: float | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    password: str | None = Field(None, min_length=8)
+
+
 # ---------------------------------------------------------------------------
 # Quote Generation
 # ---------------------------------------------------------------------------
