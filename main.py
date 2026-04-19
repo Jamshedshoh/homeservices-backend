@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import domain models so SQLAlchemy registers their metadata before create_all
@@ -53,22 +54,22 @@ app = FastAPI(
 # Routers
 # ---------------------------------------------------------------------------
 
-app.include_router(auth.router)
-app.include_router(users.router)
-app.include_router(providers.router)
-app.include_router(quotes.router)
-app.include_router(jobs.router)
-app.include_router(offers.router)
-app.include_router(messages.router)
-app.include_router(payments.router)
-app.include_router(ratings.router)
-app.include_router(recurring.router)
-app.include_router(notifications.router)
-app.include_router(admin.router)
+# app.include_router(auth.router)
+# app.include_router(users.router)
+# app.include_router(providers.router)
+# app.include_router(quotes.router)
+# app.include_router(jobs.router)
+# app.include_router(offers.router)
+# app.include_router(messages.router)
+# app.include_router(payments.router)
+# app.include_router(ratings.router)
+# app.include_router(recurring.router)
+# app.include_router(notifications.router)
+# app.include_router(admin.router)
 
 
-@app.get("/", tags=["Health"])
-def health():
+@app.get("/", response_class=HTMLResponse)
+def read_root():
     return {"status": "ok", "service": "HomeServices API"}
 
 
