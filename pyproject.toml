@@ -1,8 +1,8 @@
 [project]
 name = "homeservices-backend"
 version = "0.1.0"
-description = "Home Services Backend API"
-requires-python = ">=3.9"
-
-[project.scripts]
-app = "main:app"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.121.0",
+  "uvicorn>=0.34.0",
+]
