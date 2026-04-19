@@ -23,10 +23,10 @@ MessagingBase.metadata.create_all(bind=messaging_engine)
 FinanceBase.metadata.create_all(bind=finance_engine)
 
 
-# @asynccontextmanager
-# async def lifespan(_: FastAPI):
-#     ensure_admin_user()
-#     yield
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_admin_user()
+    yield
 
 
 app = FastAPI(
@@ -37,7 +37,7 @@ app = FastAPI(
         "booking, messaging, payments, ratings, recurring jobs, and more."
     ),
     version="1.0.0",
-    # lifespan=lifespan,
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -70,3 +70,8 @@ app.include_router(admin.router)
 @app.get("/", tags=["Health"])
 def health():
     return {"status": "ok", "service": "HomeServices API"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=5001, reload=True)
