@@ -40,14 +40,14 @@ app = FastAPI(
     # lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Total-Count", "X-Skip", "X-Limit"],
-)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],  # Restrict in production
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+#     expose_headers=["X-Total-Count", "X-Skip", "X-Limit"],
+# )
 
 # ---------------------------------------------------------------------------
 # Routers
