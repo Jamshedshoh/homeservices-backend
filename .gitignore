@@ -64,3 +64,5 @@ pyrightconfig.json
 
 # Claude Code
 .claude/
+
+.vercel
