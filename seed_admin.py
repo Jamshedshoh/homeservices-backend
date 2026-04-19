@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from auth import hash_password
 from config import settings
-from databases.auth_db import SessionLocal
+from databases.db import SessionLocal
 from models.auth import User, UserRole
 
 

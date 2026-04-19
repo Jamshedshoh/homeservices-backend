@@ -1,6 +1,5 @@
 """
 Marketplace / jobs domain.
-DB: jobs.db
 Within-domain relationships: Job ↔ Offer, Job ↔ JobTemplate.
 Cross-domain references (User, Message, Payment, Rating) stored as plain integers.
 """
@@ -12,7 +11,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from databases.jobs_db import JobsBase
+from databases.db import Base
 
 
 class ServiceCategory(str, enum.Enum):
@@ -54,7 +53,7 @@ class RecurrenceFrequency(str, enum.Enum):
     monthly = "monthly"
 
 
-class Job(JobsBase):
+class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -89,7 +88,7 @@ class Job(JobsBase):
     template: Mapped[JobTemplate | None] = relationship("JobTemplate", back_populates="jobs")
 
 
-class Offer(JobsBase):
+class Offer(Base):
     __tablename__ = "offers"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -111,7 +110,7 @@ class Offer(JobsBase):
     counter_offers: Mapped[list[Offer]] = relationship("Offer", foreign_keys=[parent_offer_id])
 
 
-class JobTemplate(JobsBase):
+class JobTemplate(Base):
     __tablename__ = "job_templates"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)

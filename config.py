@@ -2,11 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # One SQLite file per domain — swap for separate DB servers in production
-    auth_database_url: str = "sqlite:///./auth.db"
-    jobs_database_url: str = "sqlite:///./jobs.db"
-    messaging_database_url: str = "sqlite:///./messaging.db"
-    finance_database_url: str = "sqlite:///./finance.db"
+    database_url: str = "postgresql://user@localhost:5432/homeservices"
 
     secret_key: str = "change-me-in-production-use-strong-random-key"
     algorithm: str = "HS256"

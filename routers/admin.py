@@ -1,7 +1,6 @@
 """
 Admin-only management endpoints.
 Requires the `admin` role on the authenticated user.
-Spans all four domain DBs: auth, jobs, finance, messaging.
 """
 from __future__ import annotations
 
@@ -14,10 +13,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth import hash_password, require_admin
-from databases.auth_db import get_auth_db
-from databases.finance_db import get_finance_db
-from databases.jobs_db import get_jobs_db
-from databases.messaging_db import get_messaging_db
+from databases.db import get_db
 from models.auth import User, UserRole
 from models.finance import Payment, PaymentMethod, PaymentStatus, Rating
 from models.jobs import Job, JobStatus, Offer, OfferStatus, ServiceCategory
@@ -51,43 +47,41 @@ def _page_headers(response: Response, total: int, skip: int, limit: int) -> None
 
 @router.get("/stats")
 def get_stats(
-    auth_db: Session = Depends(get_auth_db),
-    jobs_db: Session = Depends(get_jobs_db),
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
     # Users
-    total_users = auth_db.query(User).count()
-    active_users = auth_db.query(User).filter(User.is_active == True).count()
-    homeowner_count = auth_db.query(User).filter(User.role.contains("homeowner")).count()
-    provider_count = auth_db.query(User).filter(User.role.contains("provider")).count()
-    admin_count = auth_db.query(User).filter(User.role.contains("admin")).count()
+    total_users = db.query(User).count()
+    active_users = db.query(User).filter(User.is_active == True).count()
+    homeowner_count = db.query(User).filter(User.role.contains("homeowner")).count()
+    provider_count = db.query(User).filter(User.role.contains("provider")).count()
+    admin_count = db.query(User).filter(User.role.contains("admin")).count()
 
     # Jobs by status
     job_status_counts = {
-        s.value: jobs_db.query(Job).filter(Job.status == s).count()
+        s.value: db.query(Job).filter(Job.status == s).count()
         for s in JobStatus
     }
     # Jobs by category
     job_category_counts = {
-        c.value: jobs_db.query(Job).filter(Job.service_category == c).count()
+        c.value: db.query(Job).filter(Job.service_category == c).count()
         for c in ServiceCategory
     }
-    total_jobs = jobs_db.query(Job).count()
+    total_jobs = db.query(Job).count()
 
     # Offers
-    total_offers = jobs_db.query(Offer).count()
-    accepted_offers = jobs_db.query(Offer).filter(Offer.status == OfferStatus.accepted).count()
+    total_offers = db.query(Offer).count()
+    accepted_offers = db.query(Offer).filter(Offer.status == OfferStatus.accepted).count()
     offer_win_rate = round(accepted_offers / total_offers, 4) if total_offers else 0.0
 
     # Mean of each provider's (accepted offers / total offers) — providers with ≥1 offer
-    pid_rows = jobs_db.query(Offer.provider_id).distinct().all()
+    pid_rows = db.query(Offer.provider_id).distinct().all()
     provider_win_rates: list[float] = []
     for (pid,) in pid_rows:
-        tot = jobs_db.query(Offer).filter(Offer.provider_id == pid).count()
+        tot = db.query(Offer).filter(Offer.provider_id == pid).count()
         if tot == 0:
             continue
-        won = jobs_db.query(Offer).filter(Offer.provider_id == pid, Offer.status == OfferStatus.accepted).count()
+        won = db.query(Offer).filter(Offer.provider_id == pid, Offer.status == OfferStatus.accepted).count()
         provider_win_rates.append(won / tot)
     avg_win_rate_across_providers = (
         round(sum(provider_win_rates) / len(provider_win_rates), 4) if provider_win_rates else 0.0
@@ -95,36 +89,36 @@ def get_stats(
 
     # Payments / Revenue
     total_revenue = float(
-        finance_db.query(func.sum(Payment.amount))
+        db.query(func.sum(Payment.amount))
         .filter(Payment.status == PaymentStatus.completed)
         .scalar() or 0
     )
     avg_payment = float(
-        finance_db.query(func.avg(Payment.amount))
+        db.query(func.avg(Payment.amount))
         .filter(Payment.status == PaymentStatus.completed)
         .scalar() or 0
     )
-    failed_payments = finance_db.query(Payment).filter(Payment.status == PaymentStatus.failed).count()
-    pending_payments = finance_db.query(Payment).filter(Payment.status == PaymentStatus.pending).count()
+    failed_payments = db.query(Payment).filter(Payment.status == PaymentStatus.failed).count()
+    pending_payments = db.query(Payment).filter(Payment.status == PaymentStatus.pending).count()
 
     # Payment method breakdown
     payment_method_counts: dict[str, int] = {}
     for method in PaymentMethod:
         payment_method_counts[method.value] = (
-            finance_db.query(Payment)
+            db.query(Payment)
             .filter(Payment.method == method, Payment.status == PaymentStatus.completed)
             .count()
         )
 
     # Ratings
-    rating_stats = finance_db.query(func.avg(Rating.score), func.count(Rating.id)).first()
+    rating_stats = db.query(func.avg(Rating.score), func.count(Rating.id)).first()
     avg_platform_rating = round(float(rating_stats[0]), 2) if rating_stats[0] else None
     total_ratings = rating_stats[1] or 0
 
     # Time-series: registrations per day (last 30 days)
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     raw_registrations = (
-        auth_db.query(
+        db.query(
             func.date(User.created_at).label("day"),
             func.count(User.id).label("count"),
         )
@@ -136,7 +130,7 @@ def get_stats(
     registrations_series = [{"date": str(r.day), "count": r.count} for r in raw_registrations]
 
     # Registrations grouped by ISO week (last 30 days)
-    recent_users = auth_db.query(User).filter(User.created_at >= cutoff).all()
+    recent_users = db.query(User).filter(User.created_at >= cutoff).all()
     week_registrations: dict[str, int] = defaultdict(int)
     for u in recent_users:
         dt = u.created_at
@@ -148,7 +142,7 @@ def get_stats(
 
     # Time-series: jobs created per day (last 30 days)
     raw_jobs = (
-        jobs_db.query(
+        db.query(
             func.date(Job.created_at).label("day"),
             func.count(Job.id).label("count"),
         )
@@ -161,7 +155,7 @@ def get_stats(
 
     # Time-series: revenue per day (last 30 days)
     raw_revenue = (
-        finance_db.query(
+        db.query(
             func.date(Payment.completed_at).label("day"),
             func.sum(Payment.amount).label("total"),
         )
@@ -224,10 +218,10 @@ def list_users(
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, le=200),
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    q = auth_db.query(User)
+    q = db.query(User)
     if role:
         q = q.filter(User.role.contains(role))
     if is_active is not None:
@@ -244,10 +238,10 @@ def list_users(
 @router.get("/users/{user_id}", response_model=UserOut)
 def get_user(
     user_id: int,
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    user = auth_db.get(User, user_id)
+    user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -257,10 +251,10 @@ def get_user(
 def update_user(
     user_id: int,
     payload: AdminUserUpdateRequest,
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    user = auth_db.get(User, user_id)
+    user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     data = payload.model_dump(exclude_unset=True)
@@ -269,7 +263,7 @@ def update_user(
         if pw is not None:
             user.hashed_password = hash_password(pw)
     if "email" in data and data["email"] is not None:
-        other = auth_db.query(User).filter(User.email == data["email"], User.id != user_id).first()
+        other = db.query(User).filter(User.email == data["email"], User.id != user_id).first()
         if other:
             raise HTTPException(status_code=400, detail="Email already in use")
         user.email = data.pop("email")
@@ -280,22 +274,22 @@ def update_user(
         user.service_categories = ",".join(c.value for c in cats) if cats else None
     for field, value in data.items():
         setattr(user, field, value)
-    auth_db.commit()
-    auth_db.refresh(user)
+    db.commit()
+    db.refresh(user)
     return user
 
 
 @router.delete("/users/{user_id}", response_model=MessageResponse)
 def delete_user(
     user_id: int,
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    user = auth_db.get(User, user_id)
+    user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    auth_db.delete(user)
-    auth_db.commit()
+    db.delete(user)
+    db.commit()
     return MessageResponse(message="User deleted")
 
 
@@ -314,10 +308,10 @@ def list_jobs(
     created_to: Optional[datetime] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, le=200),
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    q = jobs_db.query(Job)
+    q = db.query(Job)
     if status:
         try:
             st = JobStatus(status)
@@ -347,20 +341,19 @@ def list_jobs(
 @router.get("/jobs/{job_id}", response_model=JobWithOffersOut)
 def get_job(
     job_id: int,
-    jobs_db: Session = Depends(get_jobs_db),
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    job = jobs_db.get(Job, job_id)
+    job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     out = JobWithOffersOut.model_validate(job)
     out.offers = [OfferOut.model_validate(o) for o in job.offers]
-    homeowner = auth_db.get(User, job.homeowner_id)
+    homeowner = db.get(User, job.homeowner_id)
     if homeowner:
         out.homeowner = UserOut.model_validate(homeowner)
     if job.provider_id:
-        provider = auth_db.get(User, job.provider_id)
+        provider = db.get(User, job.provider_id)
         if provider:
             out.provider = UserOut.model_validate(provider)
     return out
@@ -370,30 +363,30 @@ def get_job(
 def force_job_status(
     job_id: int,
     payload: JobStatusUpdateRequest,
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    job = jobs_db.get(Job, job_id)
+    job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job.status = payload.status
-    jobs_db.commit()
-    jobs_db.refresh(job)
+    db.commit()
+    db.refresh(job)
     return job
 
 
 @router.delete("/jobs/{job_id}", response_model=MessageResponse)
 def delete_job(
     job_id: int,
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    job = jobs_db.get(Job, job_id)
+    job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    jobs_db.query(Offer).filter(Offer.job_id == job_id).delete(synchronize_session=False)
-    jobs_db.delete(job)
-    jobs_db.commit()
+    db.query(Offer).filter(Offer.job_id == job_id).delete(synchronize_session=False)
+    db.delete(job)
+    db.commit()
     return MessageResponse(message="Job deleted")
 
 
@@ -409,11 +402,10 @@ def list_offers(
     provider_id: Optional[int] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, le=200),
-    jobs_db: Session = Depends(get_jobs_db),
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    q = jobs_db.query(Offer)
+    q = db.query(Offer)
     if status:
         try:
             st = OfferStatus(status)
@@ -430,7 +422,7 @@ def list_offers(
     result = []
     for o in offers:
         out = OfferOut.model_validate(o)
-        provider = auth_db.get(User, o.provider_id)
+        provider = db.get(User, o.provider_id)
         if provider:
             out.provider = UserOut.model_validate(provider)
         result.append(out)
@@ -451,10 +443,10 @@ def list_payments(
     created_to: Optional[datetime] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, le=200),
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    q = finance_db.query(Payment)
+    q = db.query(Payment)
     if status:
         try:
             st = PaymentStatus(status)
@@ -480,17 +472,17 @@ def list_payments(
 @router.patch("/payments/{payment_id}/refund", response_model=PaymentOut)
 def refund_payment(
     payment_id: int,
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    payment = finance_db.get(Payment, payment_id)
+    payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     if payment.status != PaymentStatus.completed:
         raise HTTPException(status_code=400, detail="Only completed payments can be refunded")
     payment.status = PaymentStatus.refunded
-    finance_db.commit()
-    finance_db.refresh(payment)
+    db.commit()
+    db.refresh(payment)
     return payment
 
 
@@ -505,10 +497,10 @@ def list_ratings(
     rater_id: Optional[int] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, le=200),
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    q = finance_db.query(Rating)
+    q = db.query(Rating)
     if ratee_id is not None:
         q = q.filter(Rating.ratee_id == ratee_id)
     if rater_id is not None:
@@ -522,14 +514,14 @@ def list_ratings(
 @router.delete("/ratings/{rating_id}", response_model=MessageResponse)
 def delete_rating(
     rating_id: int,
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    rating = finance_db.get(Rating, rating_id)
+    rating = db.get(Rating, rating_id)
     if not rating:
         raise HTTPException(status_code=404, detail="Rating not found")
-    finance_db.delete(rating)
-    finance_db.commit()
+    db.delete(rating)
+    db.commit()
     return MessageResponse(message="Rating deleted")
 
 
@@ -542,10 +534,10 @@ def list_notifications(
     user_id: Optional[int] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, le=500),
-    messaging_db: Session = Depends(get_messaging_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    q = messaging_db.query(Notification)
+    q = db.query(Notification)
     if user_id is not None:
         q = q.filter(Notification.user_id == user_id)
     return q.order_by(Notification.created_at.desc()).offset(skip).limit(limit).all()
@@ -559,42 +551,40 @@ def list_notifications(
 def provider_leaderboard(
     sort_by: str = Query("total_earnings", enum=["total_earnings", "avg_rating", "completed_jobs"]),
     limit: int = Query(50, le=200),
-    auth_db: Session = Depends(get_auth_db),
-    jobs_db: Session = Depends(get_jobs_db),
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    providers = auth_db.query(User).filter(User.role.contains("provider")).all()
+    providers = db.query(User).filter(User.role.contains("provider")).all()
     rows = []
     for p in providers:
         completed = (
-            jobs_db.query(Job)
+            db.query(Job)
             .filter(Job.provider_id == p.id, Job.status == JobStatus.completed)
             .count()
         )
         active = (
-            jobs_db.query(Job)
+            db.query(Job)
             .filter(
                 Job.provider_id == p.id,
                 Job.status.in_([JobStatus.booked, JobStatus.en_route, JobStatus.in_progress]),
             )
             .count()
         )
-        total_offers = jobs_db.query(Offer).filter(Offer.provider_id == p.id).count()
+        total_offers = db.query(Offer).filter(Offer.provider_id == p.id).count()
         won_offers = (
-            jobs_db.query(Offer)
+            db.query(Offer)
             .filter(Offer.provider_id == p.id, Offer.status == OfferStatus.accepted)
             .count()
         )
         win_rate = round(won_offers / total_offers, 4) if total_offers else 0.0
 
         earnings = float(
-            finance_db.query(func.sum(Payment.amount))
+            db.query(func.sum(Payment.amount))
             .filter(Payment.provider_id == p.id, Payment.status == PaymentStatus.completed)
             .scalar() or 0
         )
         rating_row = (
-            finance_db.query(func.avg(Rating.score), func.count(Rating.id))
+            db.query(func.avg(Rating.score), func.count(Rating.id))
             .filter(Rating.ratee_id == p.id)
             .first()
         )

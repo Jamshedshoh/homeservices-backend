@@ -1,6 +1,5 @@
 """
 Job templates and recurring job scheduling.
-Domain: jobs only
 """
 from datetime import datetime, timedelta, timezone
 
@@ -8,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from auth import require_homeowner
-from databases.jobs_db import get_jobs_db
+from databases.db import get_db
 from models.auth import User
 from models.jobs import Job, JobStatus, JobTemplate, RecurrenceFrequency
 from schemas import JobOut, JobTemplateCreateRequest, JobTemplateOut, MessageResponse
@@ -26,7 +25,7 @@ RECURRENCE_DELTA: dict[RecurrenceFrequency, timedelta] = {
 @router.post("", response_model=JobTemplateOut, status_code=201)
 def create_template(
     payload: JobTemplateCreateRequest,
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_homeowner),
 ):
     template = JobTemplate(
@@ -41,19 +40,19 @@ def create_template(
         recurrence_frequency=payload.recurrence_frequency,
         next_scheduled_at=payload.next_scheduled_at,
     )
-    jobs_db.add(template)
-    jobs_db.commit()
-    jobs_db.refresh(template)
+    db.add(template)
+    db.commit()
+    db.refresh(template)
     return template
 
 
 @router.get("", response_model=list[JobTemplateOut])
 def list_templates(
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_homeowner),
 ):
     return (
-        jobs_db.query(JobTemplate)
+        db.query(JobTemplate)
         .filter(JobTemplate.homeowner_id == current_user.id)
         .order_by(JobTemplate.created_at.desc())
         .all()
@@ -63,10 +62,10 @@ def list_templates(
 @router.get("/{template_id}", response_model=JobTemplateOut)
 def get_template(
     template_id: int,
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_homeowner),
 ):
-    template = jobs_db.query(JobTemplate).filter(
+    template = db.query(JobTemplate).filter(
         JobTemplate.id == template_id, JobTemplate.homeowner_id == current_user.id
     ).first()
     if not template:
@@ -77,11 +76,11 @@ def get_template(
 @router.post("/{template_id}/dispatch", response_model=JobOut, status_code=201)
 def dispatch_job_from_template(
     template_id: int,
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_homeowner),
 ):
     """Create a new job from a saved template and advance recurrence schedule."""
-    template = jobs_db.query(JobTemplate).filter(
+    template = db.query(JobTemplate).filter(
         JobTemplate.id == template_id, JobTemplate.homeowner_id == current_user.id
     ).first()
     if not template:
@@ -99,29 +98,29 @@ def dispatch_job_from_template(
         template_id=template.id,
         status=JobStatus.open,
     )
-    jobs_db.add(job)
+    db.add(job)
 
     if template.is_recurring and template.recurrence_frequency:
         delta = RECURRENCE_DELTA[template.recurrence_frequency]
         base = template.next_scheduled_at or datetime.now(timezone.utc)
         template.next_scheduled_at = base + delta
 
-    jobs_db.commit()
-    jobs_db.refresh(job)
+    db.commit()
+    db.refresh(job)
     return job
 
 
 @router.delete("/{template_id}", response_model=MessageResponse)
 def delete_template(
     template_id: int,
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_homeowner),
 ):
-    template = jobs_db.query(JobTemplate).filter(
+    template = db.query(JobTemplate).filter(
         JobTemplate.id == template_id, JobTemplate.homeowner_id == current_user.id
     ).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    jobs_db.delete(template)
-    jobs_db.commit()
+    db.delete(template)
+    db.commit()
     return MessageResponse(message="Template deleted")

@@ -4,18 +4,83 @@ This document describes **administration**, **authentication helpers**, **data s
 
 ---
 
-## Architecture reminder
+## Architecture
 
-The service uses **four SQLite databases** (configurable via environment variables), one per domain:
+The service uses a **single PostgreSQL database** (`homeservices`) with all tables in one schema. The database URL is configured via the `DATABASE_URL` environment variable.
 
-| Database   | File (default) | Domain |
-|-----------|----------------|--------|
-| Auth      | `auth.db`      | Users and roles |
-| Jobs      | `jobs.db`      | Jobs, offers, templates |
-| Finance   | `finance.db`   | Payments, ratings |
-| Messaging | `messaging.db` | Messages, notifications |
+### Tables
 
-Cross-database references (for example `job.homeowner_id` → user id) are **application-level only**; there are no foreign keys across database files.
+| Table | Domain |
+|-------|--------|
+| `users` | Users and roles |
+| `jobs` | Job listings |
+| `offers` | Provider offers and counter-offers |
+| `job_templates` | Recurring job templates |
+| `messages` | In-app messages |
+| `notifications` | User notifications |
+| `payments` | Payment records |
+| `ratings` | Job ratings |
+
+Cross-domain references (for example `jobs.homeowner_id` → `users.id`) are **application-level only**; there are no foreign key constraints across domain boundaries, keeping domain logic decoupled.
+
+### Database connection
+
+All routers, auth helpers, and seed scripts share a **single SQLAlchemy engine** defined in `databases/db.py`. A single `get_db()` dependency yields a session for every request.
+
+```
+databases/
+  db.py          ← engine, Base, SessionLocal, get_db()
+
+models/
+  auth.py        ← User (inherits Base)
+  jobs.py        ← Job, Offer, JobTemplate (inherits Base)
+  messaging.py   ← Message, Notification (inherits Base)
+  finance.py     ← Payment, Rating (inherits Base)
+```
+
+### Migrations (Alembic)
+
+Schema changes are managed with **Alembic**. The initial migration creates all eight tables.
+
+```bash
+# Apply all pending migrations
+alembic upgrade head
+
+# After editing a model, generate a new migration
+alembic revision --autogenerate -m "describe_your_change"
+```
+
+Migration scripts live in `alembic/versions/`. The `alembic/env.py` reads `DATABASE_URL` from `config.settings` so `.env` is the single source of truth.
+
+---
+
+## Configuration
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DATABASE_URL` | `postgresql://user@localhost:5432/homeservices` | PostgreSQL connection string |
+| `SECRET_KEY` | (hardcoded fallback) | JWT signing key — **always override in production** |
+| `ALGORITHM` | `HS256` | JWT algorithm |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` (24 h) | Token lifetime |
+| `ADMIN_SEED_EMAIL` | — | Email for bootstrap admin user |
+| `ADMIN_SEED_PASSWORD` | — | Password for bootstrap admin user |
+
+Values are loaded from `.env` and overridden by `.env.local` (`.env.local` takes precedence and should not be committed).
+
+### Bootstrap admin account
+
+If `ADMIN_SEED_EMAIL` and `ADMIN_SEED_PASSWORD` are both set:
+
+1. **Application startup** (`main.py` lifespan) automatically calls `ensure_admin_user()` from `seed_admin.py`.
+2. You can also run **`python seed_admin.py`** manually at any time.
+
+Behavior:
+
+- If no user exists with that email, a new user is created with role `admin`.
+- If a user exists but does not have `admin` in their roles, `admin` is **appended** to their existing role string.
+- Safe to run repeatedly — it is idempotent.
 
 ---
 
@@ -36,31 +101,10 @@ Users store roles as a **comma-separated string** (for example `homeowner,provid
 In `auth.py`, `require_admin` follows the same pattern as `require_homeowner` and `require_provider`:
 
 - Resolves the current user from the JWT (`get_current_user`).
-- Ensures `admin` appears in the user’s role list.
+- Ensures `admin` appears in the user's role list.
 - Returns **403** with `"Admins only"` if the role is missing.
 
-All routes under `/admin` use `Depends(require_admin)` unless noted otherwise.
-
----
-
-## Configuration: bootstrap admin account
-
-In `config.py`, optional settings (also loadable from `.env`):
-
-| Setting               | Environment variable   | Purpose |
-|-----------------------|-------------------------|---------|
-| `admin_seed_email`    | `ADMIN_SEED_EMAIL`      | Email for a bootstrap admin user |
-| `admin_seed_password` | `ADMIN_SEED_PASSWORD`   | Plain-text password (hashed on insert) |
-
-If **both** are set:
-
-1. **Application startup** (`main.py` lifespan) runs `ensure_admin_user()` from `seed_admin.py`.
-2. You can also run **`python seed_admin.py`** manually.
-
-Behavior:
-
-- If no user exists with that email, a new user is created with role `admin`.
-- If a user exists but does not include `admin` in roles, the `admin` role is **appended** to the existing role string.
+All routes under `/admin` use `Depends(require_admin)`.
 
 ---
 
@@ -92,7 +136,7 @@ Base path: **`/admin`** (see `routers/admin.py`).
 
 - **users:** `total`, `active`, `inactive`, counts by role string match (`homeowners`, `providers`, `admins`).
 - **jobs:** `total`, `by_status` (all `JobStatus` values), `by_category` (all `ServiceCategory` values).
-- **offers:** `total`, `accepted`, **platform** `win_rate` (accepted ÷ total offers), **`avg_win_rate_across_providers`** (mean of each provider’s accepted ÷ their total offers).
+- **offers:** `total`, `accepted`, **platform** `win_rate` (accepted ÷ total offers), **`avg_win_rate_across_providers`** (mean of each provider's accepted ÷ their total offers).
 - **payments:** `total_revenue` and `avg_payment` (completed only), counts of failed and pending, **`by_method`** for completed payments by `PaymentMethod`.
 - **ratings:** `total`, `avg_score`.
 - **series (last 30 days):** `registrations_per_day`, `registrations_per_week` (ISO week labels), `jobs_per_day`, `revenue_per_day` (completed payments by completion date).
@@ -104,7 +148,7 @@ Base path: **`/admin`** (see `routers/admin.py`).
 | GET | `/admin/users` | `role`, `is_active`, `search`, `skip`, `limit` |
 | GET | `/admin/users/{user_id}` | — |
 | PATCH | `/admin/users/{user_id}` | `AdminUserUpdateRequest` (optional fields) |
-| DELETE | `/admin/users/{user_id}` | Hard delete user in auth DB |
+| DELETE | `/admin/users/{user_id}` | Hard delete user |
 
 **PATCH** supports optional fields such as `email`, `full_name`, `phone`, `is_active`, `role` (array of roles), `password`, provider/homeowner profile fields, and `service_categories` as a list (stored as comma-separated strings). Email uniqueness is enforced.
 
@@ -125,7 +169,7 @@ Enum query parameters are validated; invalid values return **400**.
 |--------|------|--------|
 | GET | `/admin/offers` | `status`, `job_id`, `provider_id`, `skip`, `limit` |
 
-Each offer includes nested **provider** `UserOut` when the provider exists in the auth database.
+Each offer includes nested **provider** `UserOut` when the provider exists.
 
 ### Payments
 
@@ -168,7 +212,7 @@ Other response models (`UserOut`, `JobOut`, `OfferOut`, etc.) are shared with no
 
 ## Sample data seeding (`seed_sample_data.py`)
 
-For local development and demos, this script fills **each main table** with **five** coherent rows (users, job templates, jobs, offers, payments, ratings, messages, notifications).
+For local development and demos, this script fills all tables with coherent sample rows (users, job templates, jobs, offers, payments, ratings, messages, notifications).
 
 **Usage:**
 
@@ -176,18 +220,20 @@ For local development and demos, this script fills **each main table** with **fi
 python seed_sample_data.py --force
 ```
 
-- **`--force` is required.** The script deletes all application rows in all four databases (in a safe order), then inserts sample data.
+- **`--force` is required.** The script deletes all application rows (in a safe order), then inserts sample data.
 - Without `--force`, the script exits with instructions (to avoid accidental data loss).
 
 **Credentials after seeding:** all sample users share one password printed by the script (see script output). The sample set includes `admin@sample.local` plus homeowners and providers.
 
-**Note:** Running `--force` removes **all** users, including any account created only via `ADMIN_SEED_*`. Re-run **`python seed_admin.py`** afterward if you still need that env-based admin user.
+**Note:** Running `--force` removes **all** users, including any account created via `ADMIN_SEED_*`. Re-run **`python seed_admin.py`** afterward if you still need that env-based admin user.
 
 ---
 
 ## Application lifecycle
 
-On startup, `main.py` runs **`ensure_admin_user()`** once (see [Configuration: bootstrap admin account](#configuration-bootstrap-admin-account)). Tables are created with SQLAlchemy `create_all` for each domain before the server accepts traffic.
+On startup, `main.py` runs **`ensure_admin_user()`** once (see [Configuration: bootstrap admin account](#bootstrap-admin-account)).
+
+Schema management is handled by **Alembic** — `create_all` is not called on startup. Always run `alembic upgrade head` before the first start or after pulling model changes.
 
 ---
 
@@ -206,6 +252,9 @@ Admin routes appear under the **Admin** tag. Request and response models match t
 
 | Feature | Location |
 |---------|----------|
+| Database engine & session | `databases/db.py` |
+| All ORM models | `models/auth.py`, `models/jobs.py`, `models/messaging.py`, `models/finance.py` |
+| Alembic migrations | `alembic/`, `alembic.ini` |
 | `UserRole.admin` | `models/auth.py` |
 | `require_admin` | `auth.py` |
 | Admin router | `routers/admin.py`, mounted in `main.py` |
