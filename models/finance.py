@@ -1,8 +1,7 @@
 """
 Finance domain — payments and ratings.
-DB: finance.db
-All foreign IDs (job_id, homeowner_id, provider_id, rater_id, ratee_id) are soft
-references — no DB-level FK constraints since those entities live in other DBs.
+All foreign IDs (job_id, homeowner_id, provider_id, rater_id, ratee_id) are stored
+as plain integers — no FK constraints to keep domain boundaries explicit.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Enum, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from databases.finance_db import FinanceBase
+from databases.db import Base
 
 
 class PaymentStatus(str, enum.Enum):
@@ -29,7 +28,7 @@ class PaymentMethod(str, enum.Enum):
     upi = "upi"
 
 
-class Payment(FinanceBase):
+class Payment(Base):
     __tablename__ = "payments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -47,7 +46,7 @@ class Payment(FinanceBase):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
-class Rating(FinanceBase):
+class Rating(Base):
     __tablename__ = "ratings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)

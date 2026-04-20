@@ -23,7 +23,8 @@ venv/
 env/
 .env/
 
-# Environment variables
+# Environment variables — only the example template is committed
+.env
 .env.local
 .env.*.local
 !.env.example

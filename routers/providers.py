@@ -1,6 +1,5 @@
 """
 Provider-specific endpoints: dashboard, route optimization, profile updates.
-Domains: auth (User) + jobs (Job, Offer) + finance (Payment, Rating)
 """
 import math
 from typing import Optional
@@ -10,9 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth import get_current_user, require_provider
-from databases.auth_db import get_auth_db
-from databases.finance_db import get_finance_db
-from databases.jobs_db import get_jobs_db
+from databases.db import get_db
 from models.auth import User, UserRole
 from models.finance import Payment, Rating
 from models.jobs import Job, JobStatus, Offer, OfferStatus
@@ -30,22 +27,20 @@ router = APIRouter(prefix="/providers", tags=["Providers"])
 
 # ---------------------------------------------------------------------------
 # Performance dashboard
-# Reads across jobs + finance + auth domains.
 # ---------------------------------------------------------------------------
 
 @router.get("/me/dashboard", response_model=ProviderDashboard)
 def get_dashboard(
-    jobs_db: Session = Depends(get_jobs_db),
-    finance_db: Session = Depends(get_finance_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_provider),
 ):
     completed_jobs = (
-        jobs_db.query(Job)
+        db.query(Job)
         .filter(Job.provider_id == current_user.id, Job.status == JobStatus.completed)
         .count()
     )
     active_jobs = (
-        jobs_db.query(Job)
+        db.query(Job)
         .filter(
             Job.provider_id == current_user.id,
             Job.status.in_([JobStatus.booked, JobStatus.en_route, JobStatus.in_progress]),
@@ -54,7 +49,7 @@ def get_dashboard(
     )
 
     rating_stats = (
-        finance_db.query(func.avg(Rating.score), func.count(Rating.id))
+        db.query(func.avg(Rating.score), func.count(Rating.id))
         .filter(Rating.ratee_id == current_user.id)
         .first()
     )
@@ -62,14 +57,14 @@ def get_dashboard(
     total_ratings = rating_stats[1] or 0
 
     total_earnings = float(
-        finance_db.query(func.sum(Payment.amount))
+        db.query(func.sum(Payment.amount))
         .filter(Payment.provider_id == current_user.id, Payment.status == "completed")
         .scalar() or 0
     )
 
-    total_offers = jobs_db.query(Offer).filter(Offer.provider_id == current_user.id).count()
+    total_offers = db.query(Offer).filter(Offer.provider_id == current_user.id).count()
     won_offers = (
-        jobs_db.query(Offer)
+        db.query(Offer)
         .filter(Offer.provider_id == current_user.id, Offer.status == OfferStatus.accepted)
         .count()
     )
@@ -122,11 +117,11 @@ def _nearest_neighbor_route(stops: list[RouteStop]) -> list[RouteStop]:
 
 @router.get("/me/route", response_model=RouteOptimizationResponse)
 def get_optimized_route(
-    jobs_db: Session = Depends(get_jobs_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_provider),
 ):
     active_jobs = (
-        jobs_db.query(Job)
+        db.query(Job)
         .filter(
             Job.provider_id == current_user.id,
             Job.status.in_([JobStatus.booked, JobStatus.en_route]),
@@ -169,35 +164,35 @@ def get_optimized_route(
 
 
 # ---------------------------------------------------------------------------
-# Provider profile update — auth domain only
+# Provider profile update
 # ---------------------------------------------------------------------------
 
 @router.patch("/me", response_model=UserOut)
 def update_profile(
     payload: UserUpdateRequest,
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_provider),
 ):
     for field, value in payload.model_dump(exclude_none=True).items():
         if field == "service_categories" and isinstance(value, list):
             value = ",".join(v.value if hasattr(v, "value") else v for v in value)
         setattr(current_user, field, value)
-    auth_db.commit()
-    auth_db.refresh(current_user)
+    db.commit()
+    db.refresh(current_user)
     return current_user
 
 
 # ---------------------------------------------------------------------------
-# Public provider listing — auth domain only
+# Public provider listing
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=list[UserOut])
 def list_providers(
     category: str | None = Query(None),
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    q = auth_db.query(User).filter(User.role == UserRole.provider, User.is_active == True)
+    q = db.query(User).filter(User.role == UserRole.provider, User.is_active == True)
     if category:
         q = q.filter(User.service_categories.contains(category))
     return q.all()
@@ -206,10 +201,10 @@ def list_providers(
 @router.get("/{provider_id}", response_model=UserOut)
 def get_provider(
     provider_id: int,
-    auth_db: Session = Depends(get_auth_db),
+    db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    provider = auth_db.query(User).filter(User.id == provider_id, User.role == UserRole.provider).first()
+    provider = db.query(User).filter(User.id == provider_id, User.role == UserRole.provider).first()
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
     return provider

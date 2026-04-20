@@ -1,8 +1,7 @@
 """
 Messaging & notifications domain.
-DB: messaging.db
-All foreign IDs (user_id, job_id, offer_id, sender_id, recipient_id) are soft
-references — no DB-level FK constraints since those entities live in other DBs.
+All foreign IDs (user_id, job_id, offer_id, sender_id, recipient_id) are stored
+as plain integers — no FK constraints to keep domain boundaries explicit.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Enum, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from databases.messaging_db import MessagingBase
+from databases.db import Base
 
 
 class NotificationType(str, enum.Enum):
@@ -27,7 +26,7 @@ class NotificationType(str, enum.Enum):
     rating_received = "rating_received"
 
 
-class Message(MessagingBase):
+class Message(Base):
     __tablename__ = "messages"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -40,7 +39,7 @@ class Message(MessagingBase):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-class Notification(MessagingBase):
+class Notification(Base):
     __tablename__ = "notifications"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)

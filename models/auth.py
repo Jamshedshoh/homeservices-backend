@@ -1,6 +1,5 @@
 """
 Identity & authentication domain.
-DB: auth.db
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from databases.auth_db import AuthBase
+from databases.db import Base
 
 
 class UserRole(str, enum.Enum):
@@ -19,7 +18,7 @@ class UserRole(str, enum.Enum):
     admin = "admin"
 
 
-class User(AuthBase):
+class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
