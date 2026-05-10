@@ -1,14 +1,14 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy.orm import Session
 
 from config import settings
 from databases.db import get_db
-from models.auth import User
+from models.auth import UserRole
 from utils.logger import logger
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -30,7 +30,7 @@ def create_access_token(data: dict) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_current_user(token: str = Depends(oauth2_scheme), db = Depends(get_db)) -> dict[str, Any]:
     credentials_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -44,33 +44,31 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     except JWTError:
         raise credentials_exc
 
-    user = db.get(User, int(user_id))
-    if user is None or not user.is_active:
+    sql = "SELECT * FROM users WHERE id = %s"
+    user = db.query_one(sql, (int(user_id),))
+    if user is None or not user['is_active']:
         raise credentials_exc
     return user
 
 
-def require_homeowner(current_user: User = Depends(get_current_user)) -> User:
-    from models.auth import UserRole
-    roles = [r.strip() for r in current_user.role.split(",")]
+def require_homeowner(current_user: dict = Depends(get_current_user)) -> dict:
+    roles = [r.strip() for r in current_user['role'].split(",")]
     logger.info(f"User roles: {roles}")
     if UserRole.homeowner.value not in roles:
         raise HTTPException(status_code=403, detail="Homeowners only")
     return current_user
 
 
-def require_provider(current_user: User = Depends(get_current_user)) -> User:
-    from models.auth import UserRole
-    roles = [r.strip() for r in current_user.role.split(",")]
+def require_provider(current_user: dict = Depends(get_current_user)) -> dict:
+    roles = [r.strip() for r in current_user['role'].split(",")]
     logger.info(f"User roles: {roles}")
     if UserRole.provider.value not in roles:
         raise HTTPException(status_code=403, detail="Providers only")
     return current_user
 
 
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    from models.auth import UserRole
-    roles = [r.strip() for r in current_user.role.split(",")]
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    roles = [r.strip() for r in current_user['role'].split(",")]
     if UserRole.admin.value not in roles:
         raise HTTPException(status_code=403, detail="Admins only")
     return current_user

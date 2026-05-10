@@ -4,12 +4,10 @@ Job templates and recurring job scheduling.
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 
 from auth import require_homeowner
 from databases.db import get_db
-from models.auth import User
-from models.jobs import Job, JobStatus, JobTemplate, RecurrenceFrequency
+from models.jobs import JobStatus, RecurrenceFrequency
 from schemas import JobOut, JobTemplateCreateRequest, JobTemplateOut, MessageResponse
 
 router = APIRouter(prefix="/job-templates", tags=["Recurring Jobs"])
@@ -25,102 +23,109 @@ RECURRENCE_DELTA: dict[RecurrenceFrequency, timedelta] = {
 @router.post("", response_model=JobTemplateOut, status_code=201)
 def create_template(
     payload: JobTemplateCreateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
-    template = JobTemplate(
-        homeowner_id=current_user.id,
-        name=payload.name,
-        service_category=payload.service_category,
-        description=payload.description,
-        address=payload.address,
-        estimated_hours=payload.estimated_hours,
-        base_quote=payload.base_quote,
-        is_recurring=payload.is_recurring,
-        recurrence_frequency=payload.recurrence_frequency,
-        next_scheduled_at=payload.next_scheduled_at,
-    )
-    db.add(template)
-    db.commit()
-    db.refresh(template)
-    return template
+    sql = """
+        INSERT INTO job_templates (
+            homeowner_id, name, service_category, description, address,
+            estimated_hours, base_quote, is_recurring, recurrence_frequency, next_scheduled_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+    """
+    template = db.query_one(sql, (
+        current_user['id'],
+        payload.name,
+        payload.service_category.value,
+        payload.description,
+        payload.address,
+        payload.estimated_hours,
+        payload.base_quote,
+        payload.is_recurring,
+        payload.recurrence_frequency.value if payload.recurrence_frequency else None,
+        payload.next_scheduled_at,
+    ))
+    return JobTemplateOut(**template)
 
 
 @router.get("", response_model=list[JobTemplateOut])
 def list_templates(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
-    return (
-        db.query(JobTemplate)
-        .filter(JobTemplate.homeowner_id == current_user.id)
-        .order_by(JobTemplate.created_at.desc())
-        .all()
-    )
+    sql = "SELECT * FROM job_templates WHERE homeowner_id = %s ORDER BY created_at DESC"
+    templates = db.query_all(sql, (current_user['id'],))
+    return [JobTemplateOut(**t) for t in templates]
 
 
 @router.get("/{template_id}", response_model=JobTemplateOut)
 def get_template(
     template_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
-    template = db.query(JobTemplate).filter(
-        JobTemplate.id == template_id, JobTemplate.homeowner_id == current_user.id
-    ).first()
+    sql = "SELECT * FROM job_templates WHERE id = %s AND homeowner_id = %s"
+    template = db.query_one(sql, (template_id, current_user['id']))
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    return template
+    return JobTemplateOut(**template)
 
 
 @router.post("/{template_id}/dispatch", response_model=JobOut, status_code=201)
 def dispatch_job_from_template(
     template_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
     """Create a new job from a saved template and advance recurrence schedule."""
-    template = db.query(JobTemplate).filter(
-        JobTemplate.id == template_id, JobTemplate.homeowner_id == current_user.id
-    ).first()
+    sql = "SELECT * FROM job_templates WHERE id = %s AND homeowner_id = %s"
+    template = db.query_one(sql, (template_id, current_user['id']))
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    job = Job(
-        homeowner_id=current_user.id,
-        title=template.name,
-        description=template.description,
-        service_category=template.service_category,
-        address=template.address,
-        estimated_hours=template.estimated_hours,
-        homeowner_quote=template.base_quote,
-        preferred_date=template.next_scheduled_at,
-        template_id=template.id,
-        status=JobStatus.open,
-    )
-    db.add(job)
+    sql = """
+        INSERT INTO jobs (
+            homeowner_id, title, description, service_category, address,
+            estimated_hours, homeowner_quote, preferred_date, template_id, status
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+    """
+    job = db.query_one(sql, (
+        current_user['id'],
+        template['name'],
+        template['description'],
+        template['service_category'],
+        template['address'],
+        template['estimated_hours'],
+        template['base_quote'],
+        template['next_scheduled_at'],
+        template['id'],
+        JobStatus.open.value,
+    ))
 
-    if template.is_recurring and template.recurrence_frequency:
-        delta = RECURRENCE_DELTA[template.recurrence_frequency]
-        base = template.next_scheduled_at or datetime.now(timezone.utc)
-        template.next_scheduled_at = base + delta
+    if template['is_recurring'] and template['recurrence_frequency']:
+        freq = RecurrenceFrequency(template['recurrence_frequency'])
+        delta = RECURRENCE_DELTA[freq]
+        base = template['next_scheduled_at'] or datetime.now(timezone.utc)
+        new_next = base + delta
 
-    db.commit()
-    db.refresh(job)
-    return job
+        sql = "UPDATE job_templates SET next_scheduled_at = %s WHERE id = %s"
+        db.execute(sql, (new_next, template_id))
+
+    return JobOut(**job)
 
 
 @router.delete("/{template_id}", response_model=MessageResponse)
 def delete_template(
     template_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
-    template = db.query(JobTemplate).filter(
-        JobTemplate.id == template_id, JobTemplate.homeowner_id == current_user.id
-    ).first()
+    sql = "SELECT * FROM job_templates WHERE id = %s AND homeowner_id = %s"
+    template = db.query_one(sql, (template_id, current_user['id']))
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    db.delete(template)
-    db.commit()
+
+    sql = "DELETE FROM job_templates WHERE id = %s"
+    db.execute(sql, (template_id,))
     return MessageResponse(message="Template deleted")

@@ -1,27 +1,23 @@
 """
-Re-exports all models and enums so existing imports (from models import X) keep working.
+Re-exports all enums for convenient imports.
 """
-from models.auth import User, UserRole
-from models.finance import Payment, PaymentMethod, PaymentStatus, Rating
+from models.auth import UserRole
+from models.finance import PaymentMethod, PaymentStatus
 from models.jobs import (
-    Job,
     JobStatus,
-    JobTemplate,
-    Offer,
     OfferStatus,
     RecurrenceFrequency,
     ServiceCategory,
 )
-from models.messaging import Message, Notification, NotificationType
+from models.messaging import NotificationType
 
 __all__ = [
     # auth
-    "User", "UserRole",
+    "UserRole",
     # jobs
-    "Job", "JobStatus", "Offer", "OfferStatus", "JobTemplate",
-    "RecurrenceFrequency", "ServiceCategory",
+    "JobStatus", "OfferStatus", "RecurrenceFrequency", "ServiceCategory",
     # messaging
-    "Message", "Notification", "NotificationType",
+    "NotificationType",
     # finance
-    "Payment", "PaymentStatus", "PaymentMethod", "Rating",
+    "PaymentStatus", "PaymentMethod",
 ]

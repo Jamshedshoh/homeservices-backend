@@ -6,7 +6,6 @@ Domain: auth only (for current_user — no DB writes)
 from fastapi import APIRouter, Depends
 
 from auth import require_homeowner
-from models.auth import User
 from models.jobs import ServiceCategory
 from schemas import QuoteRequest, QuoteResponse
 
@@ -33,7 +32,7 @@ MATERIAL_ESTIMATE_RATE = 0.15
 @router.post("/generate", response_model=QuoteResponse)
 def generate_quote(
     payload: QuoteRequest,
-    current_user: User = Depends(require_homeowner),
+    current_user: dict = Depends(require_homeowner),
 ):
     base_rate = BASE_RATES.get(payload.service_category, 65)
     labour = round(base_rate * payload.estimated_hours, 2)

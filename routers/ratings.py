@@ -2,14 +2,11 @@
 Post-job ratings and feedback.
 """
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 
 from auth import get_current_user, require_homeowner
 from databases.db import get_db
-from models.auth import User
-from models.finance import Payment, PaymentStatus, Rating
-from models.jobs import Job, JobStatus
-from models.messaging import Notification, NotificationType
+from models.jobs import JobStatus
+from models.messaging import NotificationType
 from schemas import RatingCreateRequest, RatingOut
 
 router = APIRouter(prefix="/ratings", tags=["Ratings"])
@@ -18,54 +15,59 @@ router = APIRouter(prefix="/ratings", tags=["Ratings"])
 @router.post("", response_model=RatingOut, status_code=201)
 def submit_rating(
     payload: RatingCreateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
-    job = db.get(Job, payload.job_id)
-    if not job or job.homeowner_id != current_user.id:
+    sql = "SELECT * FROM jobs WHERE id = %s"
+    job = db.query_one(sql, (payload.job_id,))
+    if not job or job['homeowner_id'] != current_user['id']:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != JobStatus.completed:
+    if JobStatus(job['status']) != JobStatus.completed:
         raise HTTPException(status_code=400, detail="Can only rate completed jobs")
 
-    payment = db.query(Payment).filter(Payment.job_id == job.id).first()
-    if not payment or payment.status != PaymentStatus.completed:
+    sql = "SELECT * FROM payments WHERE job_id = %s"
+    payment = db.query_one(sql, (job['id'],))
+    if not payment or payment['status'] != 'completed':
         raise HTTPException(status_code=400, detail="Payment must be completed before rating")
 
-    existing = db.query(Rating).filter(Rating.job_id == job.id).first()
+    sql = "SELECT * FROM ratings WHERE job_id = %s"
+    existing = db.query_one(sql, (job['id'],))
     if existing:
         raise HTTPException(status_code=400, detail="Already rated this job")
 
-    rating = Rating(
-        job_id=job.id,
-        rater_id=current_user.id,
-        ratee_id=job.provider_id,
-        score=payload.score,
-        comment=payload.comment,
-    )
-    db.add(rating)
-    db.flush()
-
-    db.add(Notification(
-        user_id=job.provider_id,
-        type=NotificationType.rating_received,
-        title="New Rating",
-        body=f"You received a {payload.score}/5 rating for '{job.title}'",
-        job_id=job.id,
+    sql = """
+        INSERT INTO ratings (job_id, rater_id, ratee_id, score, comment)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+    """
+    rating = db.query_one(sql, (
+        job['id'],
+        current_user['id'],
+        job['provider_id'],
+        payload.score,
+        payload.comment,
     ))
-    db.commit()
-    db.refresh(rating)
-    return rating
+
+    sql = """
+        INSERT INTO notifications (user_id, type, title, body, job_id, is_read)
+        VALUES (%s, %s, %s, %s, %s, false)
+    """
+    db.execute(sql, (
+        job['provider_id'],
+        NotificationType.rating_received.value,
+        "New Rating",
+        f"You received a {payload.score}/5 rating for '{job['title']}'",
+        job['id'],
+    ))
+    return RatingOut(**rating)
 
 
 @router.get("/providers/{provider_id}", response_model=list[RatingOut])
 def get_provider_ratings(
     provider_id: int,
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    db = Depends(get_db),
+    _: dict = Depends(get_current_user),
 ):
-    return (
-        db.query(Rating)
-        .filter(Rating.ratee_id == provider_id)
-        .order_by(Rating.created_at.desc())
-        .all()
-    )
+    sql = "SELECT * FROM ratings WHERE ratee_id = %s ORDER BY created_at DESC"
+    ratings = db.query_all(sql, (provider_id,))
+    return [RatingOut(**r) for r in ratings]

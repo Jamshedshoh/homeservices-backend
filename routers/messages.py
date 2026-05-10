@@ -2,97 +2,102 @@
 In-app messaging between homeowner and provider scoped to a job.
 """
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from databases.db import get_db
-from models.auth import User
-from models.jobs import Job, Offer
-from models.messaging import Message, Notification, NotificationType
+from models.messaging import NotificationType
 from schemas import MessageOut, MessageResponse, MessageSendRequest, UserOut
 
 router = APIRouter(prefix="/messages", tags=["Messages"])
 
 
-def _allowed_participant_ids(job: Job, db: Session) -> set[int]:
+def _allowed_participant_ids(job: dict, db) -> set[int]:
     """Return the set of user IDs that may send/read messages on this job."""
-    ids = {job.homeowner_id}
-    if job.provider_id:
-        ids.add(job.provider_id)
+    ids = {job['homeowner_id']}
+    if job['provider_id']:
+        ids.add(job['provider_id'])
     else:
-        ids |= {o.provider_id for o in db.query(Offer).filter(Offer.job_id == job.id).all()}
+        sql = "SELECT DISTINCT provider_id FROM offers WHERE job_id = %s"
+        offers = db.query_all(sql, (job['id'],))
+        ids |= {o['provider_id'] for o in offers}
     return ids
 
 
-def _enrich_message(msg: Message, db: Session) -> MessageOut:
-    sender = db.get(User, msg.sender_id)
-    msg_out = MessageOut.model_validate(msg)
-    msg_out.sender = UserOut.model_validate(sender) if sender else None
+def _enrich_message(msg: dict, db) -> MessageOut:
+    sql = "SELECT * FROM users WHERE id = %s"
+    sender = db.query_one(sql, (msg['sender_id'],))
+    msg_out = MessageOut(**msg)
+    if sender:
+        msg_out.sender = UserOut(**sender)
     return msg_out
 
 
 @router.post("", response_model=MessageOut, status_code=201)
 def send_message(
     payload: MessageSendRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
-    job = db.get(Job, payload.job_id)
+    sql = "SELECT * FROM jobs WHERE id = %s"
+    job = db.query_one(sql, (payload.job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
     allowed_ids = _allowed_participant_ids(job, db)
-    if current_user.id not in allowed_ids:
+    if current_user['id'] not in allowed_ids:
         raise HTTPException(status_code=403, detail="Not a participant in this job")
-    if payload.recipient_id not in allowed_ids or payload.recipient_id == current_user.id:
+    if payload.recipient_id not in allowed_ids or payload.recipient_id == current_user['id']:
         raise HTTPException(status_code=400, detail="Invalid recipient")
 
-    msg = Message(
-        job_id=payload.job_id,
-        sender_id=current_user.id,
-        recipient_id=payload.recipient_id,
-        content=payload.content,
-    )
-    db.add(msg)
-    db.add(Notification(
-        user_id=payload.recipient_id,
-        type=NotificationType.new_message,
-        title="New Message",
-        body=f"{current_user.full_name}: {payload.content[:80]}",
-        job_id=job.id,
+    sql = """
+        INSERT INTO messages (job_id, sender_id, recipient_id, content, is_read)
+        VALUES (%s, %s, %s, %s, false)
+        RETURNING *
+    """
+    msg = db.query_one(sql, (
+        payload.job_id,
+        current_user['id'],
+        payload.recipient_id,
+        payload.content,
     ))
-    db.commit()
-    db.refresh(msg)
+
+    sql = """
+        INSERT INTO notifications (user_id, type, title, body, job_id, is_read)
+        VALUES (%s, %s, %s, %s, %s, false)
+    """
+    db.execute(sql, (
+        payload.recipient_id,
+        NotificationType.new_message.value,
+        "New Message",
+        f"{current_user['full_name']}: {payload.content[:80]}",
+        job['id'],
+    ))
     return _enrich_message(msg, db)
 
 
 @router.get("/jobs/{job_id}", response_model=list[MessageOut])
 def get_job_messages(
     job_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
-    job = db.get(Job, job_id)
+    sql = "SELECT * FROM jobs WHERE id = %s"
+    job = db.query_one(sql, (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
     allowed_ids = _allowed_participant_ids(job, db)
-    if current_user.id not in allowed_ids:
+    if current_user['id'] not in allowed_ids:
         raise HTTPException(status_code=403, detail="Not a participant in this job")
 
-    messages = (
-        db.query(Message)
-        .filter(Message.job_id == job_id)
-        .order_by(Message.created_at)
-        .all()
-    )
+    sql = "SELECT * FROM messages WHERE job_id = %s ORDER BY created_at"
+    messages = db.query_all(sql, (job_id,))
 
-    db.query(Message).filter(
-        Message.job_id == job_id,
-        Message.recipient_id == current_user.id,
-        Message.is_read == False,
-    ).update({"is_read": True})
-    db.commit()
+    sql = """
+        UPDATE messages SET is_read = true
+        WHERE job_id = %s AND recipient_id = %s AND is_read = false
+    """
+    db.execute(sql, (job_id, current_user['id']))
 
     return [_enrich_message(m, db) for m in messages]
 
@@ -100,12 +105,14 @@ def get_job_messages(
 @router.patch("/{message_id}/read", response_model=MessageResponse)
 def mark_read(
     message_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
-    msg = db.get(Message, message_id)
-    if not msg or msg.recipient_id != current_user.id:
+    sql = "SELECT * FROM messages WHERE id = %s"
+    msg = db.query_one(sql, (message_id,))
+    if not msg or msg['recipient_id'] != current_user['id']:
         raise HTTPException(status_code=404, detail="Message not found")
-    msg.is_read = True
-    db.commit()
+
+    sql = "UPDATE messages SET is_read = true WHERE id = %s"
+    db.execute(sql, (message_id,))
     return MessageResponse(message="Message marked as read")

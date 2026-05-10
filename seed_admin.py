@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from auth import hash_password
 from config import settings
-from databases.db import SessionLocal
-from models.auth import User, UserRole
+from databases.db import get_connection, return_connection
+from psycopg2.extras import RealDictCursor
 
 
 def ensure_admin_user() -> bool:
@@ -22,31 +22,34 @@ def ensure_admin_user() -> bool:
     if not email or not password:
         return False
 
-    db = SessionLocal()
+    conn = get_connection()
     modified = False
     try:
-        user = db.query(User).filter(User.email == email).first()
-        if user:
-            roles = [r.strip() for r in user.role.split(",") if r.strip()]
-            if UserRole.admin.value not in roles:
-                roles.append(UserRole.admin.value)
-                user.role = ",".join(roles)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sql = "SELECT * FROM users WHERE email = %s"
+            cur.execute(sql, (email,))
+            user = cur.fetchone()
+
+            if user:
+                roles = [r.strip() for r in user['role'].split(",") if r.strip()]
+                if "admin" not in roles:
+                    roles.append("admin")
+                    new_role = ",".join(roles)
+                    sql = "UPDATE users SET role = %s WHERE email = %s"
+                    cur.execute(sql, (new_role, email))
+                    modified = True
+            else:
+                sql = """
+                    INSERT INTO users (email, hashed_password, full_name, phone, role, is_active, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, true, now(), now())
+                """
+                cur.execute(sql, (email, hash_password(password), "Administrator", None, "admin"))
                 modified = True
-        else:
-            user = User(
-                email=email,
-                hashed_password=hash_password(password),
-                full_name="Administrator",
-                phone=None,
-                role=UserRole.admin.value,
-                is_active=True,
-            )
-            db.add(user)
-            modified = True
-        if modified:
-            db.commit()
+
+            if modified:
+                conn.commit()
     finally:
-        db.close()
+        return_connection(conn)
     return modified
 
 

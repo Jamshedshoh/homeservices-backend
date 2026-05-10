@@ -2,17 +2,14 @@
 Offer / counter-offer flow between provider and homeowner.
 """
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
 
 from auth import get_current_user, require_homeowner, require_provider
 from databases.db import get_db
-from models.auth import User
-from models.jobs import Job, JobStatus, Offer, OfferStatus
-from models.messaging import Notification, NotificationType
+from models.jobs import JobStatus, OfferStatus
+from models.messaging import NotificationType
 from schemas import (
     BookingConfirmRequest,
     BookingOut,
-    MessageResponse,
     OfferCounterRequest,
     OfferCreateRequest,
     OfferOut,
@@ -23,221 +20,230 @@ from schemas import (
 router = APIRouter(prefix="/jobs/{job_id}/offers", tags=["Offers"])
 
 
-def _notify(
-    db: Session,
-    user_id: int,
-    ntype: NotificationType,
-    title: str,
-    body: str,
-    job_id: int | None = None,
-    offer_id: int | None = None,
-):
-    db.add(Notification(
-        user_id=user_id, type=ntype, title=title, body=body,
-        job_id=job_id, offer_id=offer_id,
-    ))
+def _notify(db, user_id: int, ntype: NotificationType, title: str, body: str, job_id: int | None = None, offer_id: int | None = None):
+    sql = """
+        INSERT INTO notifications (user_id, type, title, body, job_id, offer_id, is_read)
+        VALUES (%s, %s, %s, %s, %s, %s, false)
+    """
+    db.execute(sql, (user_id, ntype.value, title, body, job_id, offer_id))
 
 
-def _get_open_job(job_id: int, db: Session) -> Job:
-    job = db.get(Job, job_id)
+def _get_open_job(job_id: int, db):
+    sql = "SELECT * FROM jobs WHERE id = %s"
+    job = db.query_one(sql, (job_id,))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
 
-def _enrich_offer(offer: Offer, db: Session) -> OfferOut:
-    offer_out = OfferOut.model_validate(offer)
-    provider = db.get(User, offer.provider_id)
-    offer_out.provider = UserOut.model_validate(provider) if provider else None
+def _enrich_offer(offer: dict, db) -> OfferOut:
+    offer_out = OfferOut(**offer)
+    sql = "SELECT * FROM users WHERE id = %s"
+    provider = db.query_one(sql, (offer['provider_id'],))
+    if provider:
+        offer_out.provider = UserOut(**provider)
     return offer_out
 
-
-# ---------------------------------------------------------------------------
-# Provider submits offer
-# ---------------------------------------------------------------------------
 
 @router.post("", response_model=OfferOut, status_code=201)
 def submit_offer(
     job_id: int,
     payload: OfferCreateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_provider),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_provider),
 ):
     job = _get_open_job(job_id, db)
-    if job.status not in [JobStatus.open, JobStatus.negotiating]:
+    if JobStatus(job['status']) not in [JobStatus.open, JobStatus.negotiating]:
         raise HTTPException(status_code=400, detail="Job is not accepting offers")
 
-    existing = (
-        db.query(Offer)
-        .filter(Offer.job_id == job_id, Offer.provider_id == current_user.id,
-                Offer.status == OfferStatus.pending)
-        .first()
-    )
+    sql = """
+        SELECT * FROM offers
+        WHERE job_id = %s AND provider_id = %s AND status = %s
+    """
+    existing = db.query_one(sql, (job_id, current_user['id'], OfferStatus.pending.value))
     if existing:
         raise HTTPException(status_code=400, detail="You already have a pending offer on this job")
 
-    offer = Offer(
-        job_id=job_id,
-        provider_id=current_user.id,
-        proposed_price=payload.proposed_price,
-        message=payload.message,
-    )
-    db.add(offer)
-    job.status = JobStatus.negotiating
-    db.flush()
+    sql = """
+        INSERT INTO offers (job_id, provider_id, proposed_price, message, status)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+    """
+    offer = db.query_one(sql, (
+        job_id,
+        current_user['id'],
+        payload.proposed_price,
+        payload.message,
+        OfferStatus.pending.value,
+    ))
+
+    # Update job status to negotiating
+    sql = "UPDATE jobs SET status = %s WHERE id = %s"
+    db.execute(sql, (JobStatus.negotiating.value, job_id))
 
     _notify(
-        db, job.homeowner_id, NotificationType.new_offer,
+        db, job['homeowner_id'], NotificationType.new_offer,
         "New Offer Received",
-        f"Provider made an offer of ${payload.proposed_price:.2f} on '{job.title}'",
-        job_id=job.id, offer_id=offer.id,
+        f"Provider made an offer of ${payload.proposed_price:.2f} on '{job['title']}'",
+        job_id=job_id, offer_id=offer['id'],
     )
-    db.commit()
-    db.refresh(offer)
     return _enrich_offer(offer, db)
 
-
-# ---------------------------------------------------------------------------
-# Homeowner views all offers on their job
-# ---------------------------------------------------------------------------
 
 @router.get("", response_model=list[OfferOut])
 def list_offers(
     job_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     job = _get_open_job(job_id, db)
-    if job.homeowner_id != current_user.id and current_user.id not in [o.provider_id for o in job.offers]:
+
+    # Check access
+    is_homeowner = job['homeowner_id'] == current_user['id']
+
+    # Check if user has an offer on this job
+    sql = "SELECT COUNT(*) as count FROM offers WHERE job_id = %s AND provider_id = %s"
+    has_offer = db.query_one(sql, (job_id, current_user['id']))
+    is_provider_with_offer = has_offer['count'] > 0
+
+    if not (is_homeowner or is_provider_with_offer):
         raise HTTPException(status_code=403, detail="Access denied")
 
-    offers = (
-        db.query(Offer)
-        .filter(Offer.job_id == job_id)
-        .order_by(Offer.created_at)
-        .all()
-    )
+    sql = "SELECT * FROM offers WHERE job_id = %s ORDER BY created_at"
+    offers = db.query_all(sql, (job_id,))
     return [_enrich_offer(o, db) for o in offers]
 
-
-# ---------------------------------------------------------------------------
-# Homeowner accepts or rejects an offer
-# ---------------------------------------------------------------------------
 
 @router.patch("/{offer_id}", response_model=OfferOut)
 def respond_to_offer(
     job_id: int,
     offer_id: int,
     payload: OfferRespondRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
     job = _get_open_job(job_id, db)
-    if job.homeowner_id != current_user.id:
+    if job['homeowner_id'] != current_user['id']:
         raise HTTPException(status_code=403, detail="Not your job")
 
-    offer = db.query(Offer).filter(Offer.id == offer_id, Offer.job_id == job_id).first()
+    sql = "SELECT * FROM offers WHERE id = %s AND job_id = %s"
+    offer = db.query_one(sql, (offer_id, job_id))
     if not offer:
         raise HTTPException(status_code=404, detail="Offer not found")
-    if offer.status != OfferStatus.pending:
+    if offer['status'] != OfferStatus.pending.value:
         raise HTTPException(status_code=400, detail="Offer is no longer pending")
     if payload.status not in [OfferStatus.accepted, OfferStatus.rejected]:
         raise HTTPException(status_code=400, detail="Use accepted or rejected")
 
-    offer.status = payload.status
+    sql = "UPDATE offers SET status = %s WHERE id = %s RETURNING *"
+    updated_offer = db.query_one(sql, (payload.status.value, offer_id))
+
     ntype = NotificationType.offer_accepted if payload.status == OfferStatus.accepted else NotificationType.offer_rejected
-    _notify(db, offer.provider_id, ntype,
+    _notify(db, offer['provider_id'], ntype,
             "Offer Update",
-            f"Your offer for '{job.title}' was {payload.status.value}",
-            job_id=job.id, offer_id=offer.id)
-    db.commit()
-    db.refresh(offer)
-    return _enrich_offer(offer, db)
+            f"Your offer for '{job['title']}' was {payload.status.value}",
+            job_id=job_id, offer_id=offer_id)
+    return _enrich_offer(updated_offer, db)
 
-
-# ---------------------------------------------------------------------------
-# Provider submits counter-offer
-# ---------------------------------------------------------------------------
 
 @router.post("/{offer_id}/counter", response_model=OfferOut, status_code=201)
 def counter_offer(
     job_id: int,
     offer_id: int,
     payload: OfferCounterRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_provider),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_provider),
 ):
     job = _get_open_job(job_id, db)
-    parent_offer = db.query(Offer).filter(Offer.id == offer_id, Offer.job_id == job_id).first()
-    if not parent_offer or parent_offer.provider_id != current_user.id:
+    sql = "SELECT * FROM offers WHERE id = %s AND job_id = %s"
+    parent_offer = db.query_one(sql, (offer_id, job_id))
+    if not parent_offer or parent_offer['provider_id'] != current_user['id']:
         raise HTTPException(status_code=404, detail="Offer not found")
 
-    parent_offer.status = OfferStatus.countered
-    new_offer = Offer(
-        job_id=job_id,
-        provider_id=current_user.id,
-        proposed_price=payload.proposed_price,
-        message=payload.message,
-        parent_offer_id=offer_id,
-    )
-    db.add(new_offer)
-    db.flush()
+    # Update parent offer to countered
+    sql = "UPDATE offers SET status = %s WHERE id = %s"
+    db.execute(sql, (OfferStatus.countered.value, offer_id))
+
+    # Create new counter offer
+    sql = """
+        INSERT INTO offers (job_id, provider_id, proposed_price, message, parent_offer_id, status)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING *
+    """
+    new_offer = db.query_one(sql, (
+        job_id,
+        current_user['id'],
+        payload.proposed_price,
+        payload.message,
+        offer_id,
+        OfferStatus.pending.value,
+    ))
 
     _notify(
-        db, job.homeowner_id, NotificationType.new_offer,
+        db, job['homeowner_id'], NotificationType.new_offer,
         "Counter-Offer Received",
-        f"Provider countered at ${payload.proposed_price:.2f} on '{job.title}'",
-        job_id=job.id, offer_id=new_offer.id,
+        f"Provider countered at ${payload.proposed_price:.2f} on '{job['title']}'",
+        job_id=job_id, offer_id=new_offer['id'],
     )
-    db.commit()
-    db.refresh(new_offer)
     return _enrich_offer(new_offer, db)
 
-
-# ---------------------------------------------------------------------------
-# Homeowner confirms booking
-# ---------------------------------------------------------------------------
 
 @router.post("/{offer_id}/book", response_model=BookingOut)
 def confirm_booking(
     job_id: int,
     offer_id: int,
     payload: BookingConfirmRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_homeowner),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_homeowner),
 ):
     job = _get_open_job(job_id, db)
-    if job.homeowner_id != current_user.id:
+    if job['homeowner_id'] != current_user['id']:
         raise HTTPException(status_code=403, detail="Not your job")
 
-    offer = db.query(Offer).filter(
-        Offer.id == offer_id, Offer.job_id == job_id, Offer.status == OfferStatus.accepted
-    ).first()
+    sql = """
+        SELECT * FROM offers
+        WHERE id = %s AND job_id = %s AND status = %s
+    """
+    offer = db.query_one(sql, (offer_id, job_id, OfferStatus.accepted.value))
     if not offer:
         raise HTTPException(status_code=404, detail="Accepted offer not found")
 
-    job.provider_id = offer.provider_id
-    job.final_price = offer.proposed_price
-    job.scheduled_at = payload.scheduled_at
-    job.status = JobStatus.booked
+    # Update job with provider and booking details
+    sql = """
+        UPDATE jobs
+        SET provider_id = %s, final_price = %s, scheduled_at = %s, status = %s
+        WHERE id = %s
+        RETURNING *
+    """
+    updated_job = db.query_one(sql, (
+        offer['provider_id'],
+        offer['proposed_price'],
+        payload.scheduled_at,
+        JobStatus.booked.value,
+        job_id,
+    ))
 
-    db.query(Offer).filter(
-        Offer.job_id == job_id,
-        Offer.id != offer_id,
-        Offer.status == OfferStatus.pending,
-    ).update({"status": OfferStatus.rejected})
+    # Reject all other pending offers
+    sql = """
+        UPDATE offers SET status = %s
+        WHERE job_id = %s AND id != %s AND status = %s
+    """
+    db.execute(sql, (
+        OfferStatus.rejected.value,
+        job_id,
+        offer_id,
+        OfferStatus.pending.value,
+    ))
 
     _notify(
-        db, offer.provider_id, NotificationType.job_booked,
+        db, offer['provider_id'], NotificationType.job_booked,
         "Job Booked!",
-        f"You have been booked for '{job.title}' on {payload.scheduled_at.strftime('%Y-%m-%d %H:%M')}",
-        job_id=job.id,
+        f"You have been booked for '{job['title']}' on {payload.scheduled_at.strftime('%Y-%m-%d %H:%M')}",
+        job_id=job_id,
     )
-    db.commit()
-    db.refresh(job)
     return BookingOut(
-        job_id=job.id,
-        provider_id=job.provider_id,
-        scheduled_at=job.scheduled_at,
-        status=job.status,
+        job_id=updated_job['id'],
+        provider_id=updated_job['provider_id'],
+        scheduled_at=updated_job['scheduled_at'],
+        status=updated_job['status'],
     )

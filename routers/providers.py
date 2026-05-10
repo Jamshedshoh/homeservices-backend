@@ -5,16 +5,11 @@ import math
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
-from sqlalchemy.orm import Session
 
 from auth import get_current_user, require_provider
 from databases.db import get_db
-from models.auth import User, UserRole
-from models.finance import Payment, Rating
-from models.jobs import Job, JobStatus, Offer, OfferStatus
+from models.jobs import JobStatus, OfferStatus
 from schemas import (
-    MessageResponse,
     ProviderDashboard,
     RouteOptimizationResponse,
     RouteStop,
@@ -25,49 +20,57 @@ from schemas import (
 router = APIRouter(prefix="/providers", tags=["Providers"])
 
 
-# ---------------------------------------------------------------------------
-# Performance dashboard
-# ---------------------------------------------------------------------------
-
 @router.get("/me/dashboard", response_model=ProviderDashboard)
 def get_dashboard(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_provider),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_provider),
 ):
-    completed_jobs = (
-        db.query(Job)
-        .filter(Job.provider_id == current_user.id, Job.status == JobStatus.completed)
-        .count()
-    )
-    active_jobs = (
-        db.query(Job)
-        .filter(
-            Job.provider_id == current_user.id,
-            Job.status.in_([JobStatus.booked, JobStatus.en_route, JobStatus.in_progress]),
-        )
-        .count()
-    )
+    # Completed jobs
+    sql = "SELECT COUNT(*) as count FROM jobs WHERE provider_id = %s AND status = %s"
+    completed = db.query_one(sql, (current_user['id'], JobStatus.completed.value))
+    completed_jobs = completed['count']
 
-    rating_stats = (
-        db.query(func.avg(Rating.score), func.count(Rating.id))
-        .filter(Rating.ratee_id == current_user.id)
-        .first()
-    )
-    avg_rating = round(float(rating_stats[0]), 2) if rating_stats[0] else None
-    total_ratings = rating_stats[1] or 0
+    # Active jobs
+    sql = """
+        SELECT COUNT(*) as count FROM jobs
+        WHERE provider_id = %s AND status IN (%s, %s, %s)
+    """
+    active = db.query_one(sql, (
+        current_user['id'],
+        JobStatus.booked.value,
+        JobStatus.en_route.value,
+        JobStatus.in_progress.value,
+    ))
+    active_jobs = active['count']
 
-    total_earnings = float(
-        db.query(func.sum(Payment.amount))
-        .filter(Payment.provider_id == current_user.id, Payment.status == "completed")
-        .scalar() or 0
-    )
+    # Rating stats
+    sql = """
+        SELECT AVG(score)::numeric as avg_rating, COUNT(id) as total_ratings
+        FROM ratings WHERE ratee_id = %s
+    """
+    rating_stats = db.query_one(sql, (current_user['id'],))
+    avg_rating = round(float(rating_stats['avg_rating']), 2) if rating_stats['avg_rating'] else None
+    total_ratings = rating_stats['total_ratings'] or 0
 
-    total_offers = db.query(Offer).filter(Offer.provider_id == current_user.id).count()
-    won_offers = (
-        db.query(Offer)
-        .filter(Offer.provider_id == current_user.id, Offer.status == OfferStatus.accepted)
-        .count()
-    )
+    # Total earnings
+    sql = """
+        SELECT SUM(amount)::numeric as total FROM payments
+        WHERE provider_id = %s AND status = %s
+    """
+    earnings = db.query_one(sql, (current_user['id'], 'completed'))
+    total_earnings = float(earnings['total'] or 0)
+
+    # Offer stats
+    sql = "SELECT COUNT(*) as count FROM offers WHERE provider_id = %s"
+    total_offers_result = db.query_one(sql, (current_user['id'],))
+    total_offers = total_offers_result['count']
+
+    sql = """
+        SELECT COUNT(*) as count FROM offers
+        WHERE provider_id = %s AND status = %s
+    """
+    won = db.query_one(sql, (current_user['id'], OfferStatus.accepted.value))
+    won_offers = won['count']
     win_rate = round(won_offers / total_offers, 2) if total_offers else 0.0
 
     return ProviderDashboard(
@@ -79,10 +82,6 @@ def get_dashboard(
         win_rate=win_rate,
     )
 
-
-# ---------------------------------------------------------------------------
-# Route optimization
-# ---------------------------------------------------------------------------
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371.0
@@ -117,25 +116,27 @@ def _nearest_neighbor_route(stops: list[RouteStop]) -> list[RouteStop]:
 
 @router.get("/me/route", response_model=RouteOptimizationResponse)
 def get_optimized_route(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_provider),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_provider),
 ):
-    active_jobs = (
-        db.query(Job)
-        .filter(
-            Job.provider_id == current_user.id,
-            Job.status.in_([JobStatus.booked, JobStatus.en_route]),
-        )
-        .all()
-    )
+    sql = """
+        SELECT * FROM jobs
+        WHERE provider_id = %s AND status IN (%s, %s)
+        ORDER BY scheduled_at
+    """
+    active_jobs = db.query_all(sql, (
+        current_user['id'],
+        JobStatus.booked.value,
+        JobStatus.en_route.value,
+    ))
 
     stops = [
         RouteStop(
-            job_id=j.id,
-            address=j.address,
-            scheduled_at=j.scheduled_at,
-            latitude=j.latitude,
-            longitude=j.longitude,
+            job_id=j['id'],
+            address=j['address'],
+            scheduled_at=j['scheduled_at'],
+            latitude=j['latitude'],
+            longitude=j['longitude'],
         )
         for j in active_jobs
     ]
@@ -163,48 +164,54 @@ def get_optimized_route(
     )
 
 
-# ---------------------------------------------------------------------------
-# Provider profile update
-# ---------------------------------------------------------------------------
-
 @router.patch("/me", response_model=UserOut)
 def update_profile(
     payload: UserUpdateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_provider),
+    db = Depends(get_db),
+    current_user: dict = Depends(require_provider),
 ):
-    for field, value in payload.model_dump(exclude_none=True).items():
+    updates = payload.model_dump(exclude_none=True)
+    set_clauses = []
+    params = []
+
+    for field, value in updates.items():
         if field == "service_categories" and isinstance(value, list):
             value = ",".join(v.value if hasattr(v, "value") else v for v in value)
-        setattr(current_user, field, value)
-    db.commit()
-    db.refresh(current_user)
-    return current_user
+        set_clauses.append(f"{field} = %s")
+        params.append(value)
 
+    if not set_clauses:
+        return UserOut(**current_user)
 
-# ---------------------------------------------------------------------------
-# Public provider listing
-# ---------------------------------------------------------------------------
+    params.append(current_user['id'])
+    sql = f"UPDATE users SET {', '.join(set_clauses)} WHERE id = %s RETURNING *"
+    updated_user = db.query_one(sql, tuple(params))
+    return UserOut(**updated_user)
+
 
 @router.get("", response_model=list[UserOut])
 def list_providers(
     category: str | None = Query(None),
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    db = Depends(get_db),
+    _: dict = Depends(get_current_user),
 ):
-    q = db.query(User).filter(User.role == UserRole.provider, User.is_active == True)
     if category:
-        q = q.filter(User.service_categories.contains(category))
-    return q.all()
+        sql = "SELECT * FROM users WHERE role LIKE %s AND is_active = true AND service_categories LIKE %s"
+        providers = db.query_all(sql, ('%provider%', f'%{category}%'))
+    else:
+        sql = "SELECT * FROM users WHERE role LIKE %s AND is_active = true"
+        providers = db.query_all(sql, ('%provider%',))
+    return [UserOut(**p) for p in providers]
 
 
 @router.get("/{provider_id}", response_model=UserOut)
 def get_provider(
     provider_id: int,
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    db = Depends(get_db),
+    _: dict = Depends(get_current_user),
 ):
-    provider = db.query(User).filter(User.id == provider_id, User.role == UserRole.provider).first()
+    sql = "SELECT * FROM users WHERE id = %s AND role LIKE %s"
+    provider = db.query_one(sql, (provider_id, '%provider%'))
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
-    return provider
+    return UserOut(**provider)
