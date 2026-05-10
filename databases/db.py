@@ -1,7 +1,6 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
-from contextlib import contextmanager
 
 from config import settings
 
@@ -71,7 +70,6 @@ def execute_transaction(queries: list[tuple[str, tuple]]):
         return_connection(conn)
 
 
-@contextmanager
 def get_db():
     """Dependency for FastAPI endpoints - provides a query executor."""
     class QueryExecutor:
