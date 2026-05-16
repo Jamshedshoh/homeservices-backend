@@ -74,6 +74,7 @@ CREATE TABLE users (
     role VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     bio TEXT,
     service_categories VARCHAR(500),
     hourly_rate FLOAT,
